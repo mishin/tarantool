@@ -55,6 +55,7 @@ struct xrow_header {
 	int64_t lsn; /* LSN must be signed for correct comparison */
 	double tm;
 
+	int ignore_crc;
 	int bodycnt;
 	uint32_t schema_id;
 	struct iovec body[XROW_BODY_IOVMAX];

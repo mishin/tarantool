@@ -528,7 +528,7 @@ error:
 		return 1;
 
 	/* Validate checksum */
-	if (crc32_calc(0, rbuf->wpos, len) != crc32c) {
+	if (row->ignore_crc == 0 && crc32_calc(0, rbuf->wpos, len) != crc32c) {
 		char buf[PATH_MAX];
 		snprintf(buf, sizeof(buf), "%s: row block checksum"
 			 " mismatch (expected %u) at offset %" PRIu64,
