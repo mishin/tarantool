@@ -244,6 +244,20 @@ vy_avg_prepare(struct vy_avg *a)
 	         a->min, a->max, a->avg);
 }
 
+/*
+ * Scale the bandwidth to 60 seconds before accumulating a new
+ * measurement so that the history is gradually disregarded.
+ */
+#define VY_BANDWIDTH_INTERVAL	((uint64_t)60 * 1000 * 1000 * 1000)
+
+static void
+vy_bandwidth_update(uint64_t *bw, uint64_t delta_ns, uint64_t amount)
+{
+	*bw = ((double)amount * 1000000000ULL +
+	       (double)*bw * VY_BANDWIDTH_INTERVAL) /
+		(VY_BANDWIDTH_INTERVAL + delta_ns);
+}
+
 static struct vy_quota *
 vy_quota_new(int64_t limit)
 {
@@ -324,10 +338,14 @@ struct vy_stat {
 	uint64_t tx_conflict;
 	struct vy_avg    tx_latency;
 	struct vy_avg    tx_stmts;
+	uint64_t last_tx;
+	uint64_t tx_rate;		/* bytes/s */
 	/* cursor */
 	uint64_t cursor;
 	struct vy_avg    cursor_latency;
 	struct vy_avg    cursor_ops;
+	/* dump */
+	uint64_t dump_bandwidth;	/* bytes/s */
 };
 
 static struct vy_stat *
@@ -376,15 +394,20 @@ vy_stat_get(struct vy_stat *s, const struct vy_stat_get *statget)
 
 static void
 vy_stat_tx(struct vy_stat *s, uint64_t start, uint32_t count,
-	   uint32_t write_count, bool is_rollback)
+	   uint32_t write_count, size_t write_size, bool is_rollback)
 {
-	uint64_t diff = clock_monotonic64() - start;
+	uint64_t now = clock_monotonic64();
+
 	s->tx++;
 	if (is_rollback)
 		s->tx_rlb++;
 	s->write_count += write_count;
 	vy_avg_update(&s->tx_stmts, count);
-	vy_avg_update(&s->tx_latency, diff);
+	vy_avg_update(&s->tx_latency, now - start);
+	if (!is_rollback) {
+		vy_bandwidth_update(&s->tx_rate, now - s->last_tx, write_size);
+		s->last_tx = now;
+	}
 }
 
 static void
@@ -394,6 +417,13 @@ vy_stat_cursor(struct vy_stat *s, uint64_t start, int ops)
 	s->cursor++;
 	vy_avg_update(&s->cursor_latency, diff);
 	vy_avg_update(&s->cursor_ops, ops);
+}
+
+static void
+vy_stat_dump(struct vy_stat *s, uint64_t start, size_t write_size)
+{
+	vy_bandwidth_update(&s->dump_bandwidth,
+			    clock_monotonic64() - start, write_size);
 }
 
 /** There was a backend read. This flag is additive. */
@@ -1230,7 +1260,7 @@ vy_tx_rollback(struct vy_env *e, struct vy_tx *tx)
 		txv_delete(v);
 		count++;
 	}
-	vy_stat_tx(e->stat, tx->start, count, 0, true);
+	vy_stat_tx(e->stat, tx->start, count, 0, 0, true);
 }
 
 static const char *
@@ -2413,8 +2443,8 @@ vy_write_range_header(int fd, struct vy_range *range)
  */
 static int
 vy_range_write_run(struct vy_range *range, struct vy_write_iterator *wi,
-		   struct vy_stmt *split_key, int *p_fd,
-		   struct vy_run **p_run, struct vy_stmt **stmt)
+		   struct vy_stmt *split_key, int *p_fd, struct vy_run **p_run,
+		   struct vy_stmt **stmt, size_t *write_size)
 {
 	assert(stmt);
 	assert(*stmt);
@@ -2458,6 +2488,8 @@ create_failed:
 	if (vy_run_write(fd, wi, split_key, index->key_def,
 			 index->key_def->opts.page_size, p_run, stmt) != 0)
 		goto fail;
+
+	*write_size += (*p_run)->info.size;
 
 	if (created) {
 		/*
@@ -3009,12 +3041,11 @@ out:
  */
 static struct txv *
 vy_tx_write(write_set_t *write_set, struct txv *v, uint64_t time,
-	 enum vinyl_status status, int64_t lsn)
+	 enum vinyl_status status, int64_t lsn, size_t *quota)
 {
 	struct vy_index *index = v->index;
 	struct vy_range *prev_range = NULL;
 	struct vy_range *range = NULL;
-	size_t quota = 0;
 
 	for (; v && v->index == index; v = write_set_next(write_set, v)) {
 
@@ -3056,14 +3087,12 @@ vy_tx_write(write_set_t *write_set, struct txv *v, uint64_t time,
 		(void) rc;
 		/* update range */
 		range->used += vy_stmt_size(stmt);
-		quota += vy_stmt_size(stmt);
+		*quota += vy_stmt_size(stmt);
 	}
 	if (range != NULL) {
 		range->update_time = time;
 		vy_scheduler_update_range(index->env->scheduler, range);
 	}
-	/* Take quota after having unlocked the index mutex. */
-	vy_quota_use(index->env->quota, quota);
 	return v;
 }
 
@@ -3092,6 +3121,12 @@ struct vy_task {
 
 	/** index this task is for */
 	struct vy_index *index;
+
+	/** Value of clock_monotonic64() at the time of task creation. */
+	uint64_t start_time;
+
+	/** Number of bytes written to disk by this task. */
+	size_t dump_size;
 
 	/**
 	 * View sequence number at the time when the task was scheduled.
@@ -3131,6 +3166,7 @@ vy_task_new(struct mempool *pool, struct vy_index *index,
 	task->ops = ops;
 	task->index = index;
 	vy_index_ref(index);
+	task->start_time = clock_monotonic64();
 	return task;
 }
 
@@ -3138,6 +3174,9 @@ static void
 vy_task_delete(struct mempool *pool, struct vy_task *task)
 {
 	if (task->index) {
+		if (task->dump_size > 0)
+			vy_stat_dump(task->index->env->stat,
+				     task->start_time, task->dump_size);
 		vy_index_unref(task->index);
 		task->index = NULL;
 	}
@@ -3173,8 +3212,8 @@ vy_task_dump_execute(struct vy_task *task)
 	rc = vy_write_iterator_next(wi, &stmt);
 	if (rc || stmt == NULL)
 		goto out;
-	rc = vy_range_write_run(range, wi, NULL,
-				&range->fd, &task->dump.new_run, &stmt);
+	rc = vy_range_write_run(range, wi, NULL, &range->fd,
+				&task->dump.new_run, &stmt, &task->dump_size);
 out:
 	vy_write_iterator_delete(wi);
 	return rc;
@@ -3184,6 +3223,7 @@ static int
 vy_task_dump_complete(struct vy_task *task)
 {
 	struct vy_index *index = task->index;
+	struct vy_env *env = index->env;
 	struct vy_range *range = task->dump.range;
 	struct vy_run *run = task->dump.new_run;
 	struct vy_mem *mem;
@@ -3217,7 +3257,7 @@ vy_task_dump_complete(struct vy_task *task)
 		mem = next;
 	}
 out:
-	vy_scheduler_add_range(index->env->scheduler, range);
+	vy_scheduler_add_range(env->scheduler, range);
 	return 0;
 }
 
@@ -3300,8 +3340,8 @@ vy_task_compact_execute(struct vy_task *task)
 				      rc = -1; goto out;});
 		}
 
-		rc = vy_range_write_run(p->range, wi, split_key,
-					&parts[i].fd, &p->run, &curr_stmt);
+		rc = vy_range_write_run(p->range, wi, split_key, &parts[i].fd,
+					&p->run, &curr_stmt, &task->dump_size);
 		if (rc != 0)
 			goto out;
 		if (curr_stmt == NULL) {
@@ -4179,9 +4219,11 @@ vy_info_append_performance(struct vy_info *info, struct vy_info_node *root)
 	vy_info_append_u64(node, "tx_conflict", stat->tx_conflict);
 	vy_info_append_u32(node, "tx_active_rw", env->xm->count_rw);
 	vy_info_append_u32(node, "tx_active_ro", env->xm->count_rd);
+	vy_info_append_u64(node, "tx_rate", stat->tx_rate);
 	vy_info_append_str(node, "get_read_disk", stat->get_read_disk.sz);
 	vy_info_append_str(node, "get_read_cache", stat->get_read_cache.sz);
 	vy_info_append_str(node, "cursor_latency", stat->cursor_latency.sz);
+	vy_info_append_u64(node, "dump_bandwidth", stat->dump_bandwidth);
 	return 0;
 }
 
@@ -5195,10 +5237,11 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 	struct txv *v = write_set_first(&tx->write_set);
 
 	uint64_t write_count = 0;
+	size_t quota = 0;
 	/** @todo: check return value of vy_tx_write(). */
 	while (v != NULL) {
 		++write_count;
-		v = vy_tx_write(&tx->write_set, v, now, e->status, lsn);
+		v = vy_tx_write(&tx->write_set, v, now, e->status, lsn, &quota);
 	}
 
 	uint32_t count = 0;
@@ -5210,7 +5253,8 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 		/* Don't touch write_set, we're deleting all keys. */
 		txv_delete(v);
 	}
-	vy_stat_tx(e->stat, tx->start, count, write_count, false);
+	vy_stat_tx(e->stat, tx->start, count, write_count, quota, false);
+	vy_quota_use(e->quota, quota);
 	free(tx);
 	return 0;
 }
