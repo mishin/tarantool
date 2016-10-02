@@ -13,7 +13,8 @@ space:select()
 space:delete({'xxx'})
 
 test_run:cmd("setopt delimiter ';'")
-for _, v in ipairs({ 'path', 'build', 'tx_latency', 'cursor_latency',
+for _, v in ipairs({ 'path', 'build', 'tx_latency', 'tx_rate',
+                     'dump_bandwidth', 'cursor_latency',
                      'get_latency', 'gc_active', 'run_avg', 'run_count',
                      'page_count', 'memory_used', 'run_max', 'run_histogram',
                      'size', 'size_uncompressed', 'used', 'count'}) do
