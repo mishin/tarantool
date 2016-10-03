@@ -190,6 +190,7 @@ vy_buf_at(struct vy_buf *b, int size, int i) {
 struct vy_quota {
 	bool enable;
 	int64_t limit;
+	int64_t watermark;
 	int64_t used;
 	struct ipc_cond cond;
 };
@@ -215,6 +216,12 @@ vy_quota_used_percent(struct vy_quota *q)
 	if (q->limit == 0)
 		return 0;
 	return (q->used * 100) / q->limit;
+}
+
+static bool
+vy_quota_exceeded(struct vy_quota *q)
+{
+	return q->used >= q->watermark;
 }
 
 struct vy_avg {
@@ -275,6 +282,7 @@ vy_quota_new(int64_t limit)
 	}
 	q->enable = false;
 	q->limit  = limit;
+	q->watermark = limit;
 	q->used   = 0;
 	ipc_cond_create(&q->cond);
 	return q;
@@ -296,13 +304,17 @@ vy_quota_enable(struct vy_quota *q)
 }
 
 static void
-vy_quota_use(struct vy_quota *q, int64_t size)
+vy_quota_use(struct vy_quota *q, int64_t size,
+	     struct ipc_cond *no_quota_cond)
 {
-	if (size == 0)
-		return;
-	while (q->enable && q->used + size >= q->limit)
-		ipc_cond_wait(&q->cond);
 	q->used += size;
+	while (q->enable) {
+		if (q->used >= q->watermark)
+			ipc_cond_signal(no_quota_cond);
+		if (q->used < q->limit)
+			break;
+		ipc_cond_wait(&q->cond);
+	}
 }
 
 static void
@@ -3637,7 +3649,10 @@ vy_scheduler_peek_dump(struct vy_scheduler *scheduler, struct vy_task **ptask)
 	vy_dump_heap_iterator_init(&scheduler->dump_heap, &it);
 	while ((pn = vy_dump_heap_iterator_next(&it))) {
 		range = container_of(pn, struct vy_range, nodedump);
-		if (!vy_range_need_dump(range))
+		if (range->used == 0)
+			return 0;
+		if (!vy_range_need_dump(range) &&
+		    !vy_quota_exceeded(scheduler->env->quota))
 			return 0; /* nothing to do */
 		*ptask = vy_task_dump_new(&scheduler->task_pool, range);
 		if (*ptask == NULL)
@@ -3929,6 +3944,40 @@ vy_scheduler_stop(struct vy_scheduler *scheduler)
 	stailq_foreach_entry_safe(task, next, &scheduler->output_queue, link)
 		vy_task_delete(&scheduler->task_pool, task);
 	stailq_create(&scheduler->output_queue);
+}
+
+static void
+vy_update_quota_watermark(struct vy_env *e)
+{
+	struct vy_quota *q = e->quota;
+	struct heap_iterator it;
+	struct heap_node *pn;
+
+	/*
+	 * In order to avoid throttling transactions due to the hard
+	 * memory limit, we start dumping ranges beforehand, after
+	 * exceeding the memory watermark, which is less than the limit.
+	 * The gap between the watermark and the hard limit is set to
+	 * such a value that should allow us to dump the biggest range
+	 * before the hard limit is hit, basing on average insertion
+	 * rate and disk bandwidth.
+	 */
+	q->watermark = q->limit;
+
+	vy_dump_heap_iterator_init(&e->scheduler->dump_heap, &it);
+	pn = vy_dump_heap_iterator_next(&it);
+	if (pn != NULL) {
+		struct vy_range *range = container_of(pn, struct vy_range,
+						      nodedump);
+		q->watermark -= (double)range->used * e->stat->tx_rate /
+						(e->stat->dump_bandwidth + 1);
+		/*
+		 * Do not put too high pressure on ranges, because it
+		 * might result in write amplification, which isn't
+		 * better than throttling.
+		 */
+		q->watermark = MAX(q->watermark, q->limit / 4);
+	}
 }
 
 /*
@@ -5239,7 +5288,8 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 		txv_delete(v);
 	}
 	vy_stat_tx(e->stat, tx->start, count, write_count, quota, false);
-	vy_quota_use(e->quota, quota);
+	vy_update_quota_watermark(e);
+	vy_quota_use(e->quota, quota, &e->scheduler->scheduler_cond);
 	free(tx);
 	return 0;
 }
