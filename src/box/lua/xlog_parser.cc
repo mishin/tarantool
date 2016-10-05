@@ -21,6 +21,7 @@ extern "C" {
 
 /********************************** helpers **********************************/
 
+static box_tuple_format_t *fmt = NULL;
 static uint32_t CTID_STRUCT_FFI_XLOG_CURSOR_REF = 0;
 static const char *xloglib_name = "xlog";
 
@@ -82,17 +83,20 @@ parse_body_kv(struct lua_State *L, const char **beg, const char *end)
 	case IPROTO_TUPLE:
 	case IPROTO_OPS:
 		if (mp_typeof(**beg) == MP_ARRAY) {
-			const char *tuple_beg = *beg;
-			mp_next(beg);
-			struct tuple *tuple = NULL;
-			box_tuple_format_t *fmt = box_tuple_format_default();
-			tuple = box_tuple_new(fmt, tuple_beg, *beg);
-			if (!tuple) {
-				lbox_error(L);
-				return -1;
+			if (fmt == NULL)
+				fmt = box_tuple_format_default();
+			if (fmt != NULL) {
+				const char *tuple_beg = *beg;
+				mp_next(beg);
+				struct tuple *tuple = NULL;
+				assert(fmt != NULL);
+				tuple = box_tuple_new(fmt, tuple_beg, *beg);
+				if (!tuple) {
+					lbox_error(L);
+					return -1;
+				}
+				lbox_pushtuple(L, tuple);
 			}
-			lbox_pushtuple(L, tuple);
-			break;
 		}
 	default:
 		if (luamp_decode_verify(L, luaL_msgpack_default, beg, end) == -1)
@@ -127,10 +131,10 @@ parse_body(struct lua_State *L, const char *ptr, size_t len)
 static int
 next_row(struct lua_State *L, xlog_cursor *cur) {
 	struct xrow_header row;
-	row.ignore_crc = 1;
 	if (xlog_cursor_next(cur, &row) != 0)
 		return -1;
 
+	lua_pushinteger(L, row.lsn);
 	lua_newtable(L);
 	lua_pushstring(L, "HEADER");
 
@@ -182,7 +186,6 @@ lbox_xlog_parser_gc(struct lua_State *L)
 
 	if (log->xlobject) {
 		xlog_close(log->xlobject);
-		free(log->xlobject);
 		log->xlobject = NULL;
 	}
 	if (log->xlobject) {
@@ -198,9 +201,9 @@ static int
 lbox_xlog_parser_iterate(struct lua_State *L)
 {
 	struct ffi_xlog_cursor *log = lbox_checkffixlog(L, 1, "bad pairs argument");
-	int i = luaL_checkinteger(L, 2);
+	// int i = luaL_checkinteger(L, 2);
 
-	lua_pushinteger(L, i + 1);
+	// lua_pushinteger(L, i + 1);
 	if (next_row(L, log->xlcobject) == 0)
 		return 2;
 	return 0;
@@ -262,10 +265,10 @@ lbox_xlog_parser_open(struct lua_State *L)
 		luaL_error(L, "%s: failed to read log file header", filename);
 	}
 
-
 	if (strcmp("0.12\n", version) != 0) {
-		luaL_error(L, "%s: unsupported file format version '%.*s'",
-			   filename, strlen(version - 1), version);
+		version[strlen(version) - 1] = '\0';
+		luaL_error(L, "%s: unsupported file format version '%s'",
+			   filename, version);
 	}
 	lbox_xlog_skip_header(L, f, filename);
 
@@ -279,6 +282,7 @@ lbox_xlog_parser_open(struct lua_State *L)
 	/* Construct xlog cursor */
 	obj->xlcobject = (struct xlog_cursor *)calloc(1,
 			sizeof(struct xlog_cursor));
+	obj->xlcobject->ignore_crc = true;
 	if (obj->xlcobject == NULL) {
 		/* TODO: throw error */
 	}

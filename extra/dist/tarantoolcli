@@ -1,64 +1,393 @@
 #!/usr/bin/env tarantool
 
-local function getparam (t_in, options, params)
+local io      = require('io')
+local fun     = require('fun')
+local log     = require('log')
+local json    = require('json')
+local xlog    = require('xlog')
+local yaml    = require('yaml')
+local remote  = require('net.box')
+local console = require('console')
+
+local function parse_param_prefix(param)
+    if param == nil then return nil end
+    local is_long  = (param:find("^[-][-]") ~= nil)
+    local is_short = not is_long and (param:find("^[-]") ~= nil)
+    local is_dash  = is_short and (param:find("^[-]$") ~= nil)
+    return is_long, is_short, is_dash
+end
+
+local function result_set_add(t_out, key, val)
+    if val == nil then
+        table.insert(t_out, key)
+    elseif t_out[key] == nil then
+        t_out[key] = val
+    elseif type(t_out[key]) == 'table' then
+        table.insert(t_out[key], val)
+    else
+        t_out[key] = {t_out[key], val}
+    end
+end
+
+local function convert_parameter_simple(name, convert_from, convert_to)
+    if convert_to == 'number' then
+        local converted = tonumber(convert_from)
+        if converted == nil then
+            error(
+                ('Bad value for parameter %s. expected type %s, got "%s"')
+                :format(name, convert_to, convert_from)
+            )
+        end
+        return converted
+    elseif convert_to == 'boolean' then
+        if type(convert_from) ~= 'boolean' then
+            error(
+                ('Bad input for parameter "%s". Expected boolean, got "%s"')
+                :format(name, convert_from)
+            )
+        end
+    elseif convert_to == 'string' then
+        if type(convert_from) ~= 'string' then
+            error(
+                ('Bad input for parameter "%s". Expected string, got "%s"')
+                :format(name, convert_from)
+            )
+        end
+    else
+        error(
+            ('Bad convertion format "%s" provided for %s')
+            :format(convert_to, name)
+        )
+    end
+    return convert_from
+end
+
+local function convert_parameter(name, convert_from, convert_to)
+    if convert_to == nil then
+        return convert_from
+    end
+    if convert_to:find('+') then
+        convert_to = convert_to:sub(1, -2)
+        if type(convert_from) ~= 'table' then
+            convert_from = { convert_from }
+        end
+        convert_from = fun.iter(convert_from):map(function(v)
+            return convert_parameter_simple(name, v, convert_to)
+        end):totable()
+    else
+        if type(convert_from) == 'table' then
+            convert_from = table.remove(convert_from)
+        end
+        convert_from = convert_parameter_simple(name, convert_from, convert_to)
+    end
+    return convert_from
+end
+
+local function parameters_get(t_in, options)
     local t_out = {}
+    local skip_param = false
     for i, v in ipairs(t_in) do
-        local prefix, command = v:sub(1,1), v:sub(2)
-        if prefix == "$" then
-            table.insert(t_out, command)
-        elseif prefix == "-" then
-            for id in command:gmatch("[^,;]+") do
-                if not (id:match("^[%a_][%w_]*$") and true) then
+        -- we've used this parameter as value
+        if skip_param == true then
+            skip_param = false
+            goto nextparam
+        end
+        local is_long, is_short, is_dash = parse_param_prefix(v)
+        if not is_dash and is_short then
+            local commands = v:sub(2)
+            if not (commands:match("^[%a]+$")) then
+                error(("bad argument #%d: ID not valid"):format(i))
+            end
+            for id in v:sub(2):gmatch("%a") do
+                result_set_add(t_out, id, true)
+            end
+        elseif is_long then
+            local command = v:sub(3)
+            if command:find('=') then
+                local key, val = command:match("^([%a_][%w_-]+)%=(.*)$")
+                if key == nil or val == nil then
                     error(("bad argument #%d: ID not valid"):format(i))
                 end
-                t_out[id] = true
-            end
-        elseif prefix == "!" then
-            local f, err = loadstring(command)
-            if not f then
-                error(("bad argument #%d: %s"):format(i, err))
-            end
-            setfenv(f, t_out)()
-        elseif v:find("=") then
-            local ids, val = v:match("^([^=]+)%=(.*)") -- no space around =
-            if not ids then
-                error(("bad argument #%d: invalid assignment syntax"):format(i))
-            end
-            val = val:sub(1, 1) == "$" and val:sub(2) or tonumber(val) or val
-            for id in ids:gmatch("[^,;]+") do
-                if not (id:match("^[%a_][%w_]*$") and true) then
+                result_set_add(t_out, key, val)
+            else
+                if command:match("^([%a_][%w_-]+)$") == nil then
                     error(("bad argument #%d: ID not valid"):format(i))
                 end
-                t_out[id] = val
+                local val = true
+                do
+                    -- in case next argument is value of this key (not --arg)
+                    local next_arg = t_in[i + 1]
+                    local is_long, is_short, is_dash = parse_param_prefix(next_arg)
+                    if is_dash then
+                        skip_param = true
+                    elseif is_long == false and not is_short and not is_dash then
+                        val = next_arg
+                        skip_param = true
+                    end
+                end
+                result_set_add(t_out, command, val)
             end
         else
             table.insert(t_out, v)
         end
+::nextparam::
     end
     if options then
         local lookup, unknown = {}, {}
         for _, v in ipairs(options) do
-            lookup[v] = true
+            lookup[v[1]] = v[2] or true
         end
-        for k, _ in pairs(t_out) do
+        for k, v in pairs(t_out) do
             if lookup[k] == nil and type(k) == "string" then
                 table.insert(unknown, k)
+            elseif type(lookup[k]) == 'string' then
+                t_out[k] = convert_parameter(k, v, lookup[k])
             end
         end
         if #unknown > 0 then
             error(("unknown options: %s"):format(table.concat(unknown, ", ")))
         end
     end
-    if params then
-        local missing = {}
-        for _, v in ipairs(params) do
-            if t_out[v] == nil then table.insert(missing, v) end
-        end
-        if #missing > 0 then
-            error(("missing parameters: %s"):format(table.concat(missing, ", ")))
-        end
-    end
     return t_out
 end
+
+local function find_space(sid, spaces)
+    if type(spaces) == 'number' then
+        return sid == spaces
+    end
+    local shown = false
+    for _, v in ipairs(spaces) do
+        if v == sid then
+            shown = true
+            break
+        end
+    end
+    return shown
+end
+
+local write_lua_table = nil
+
+-- escaped string will be written
+local function write_lua_string(string)
+    io.stdout:write("'")
+    local pos, byte = 1, string:byte(1)
+    while byte ~= nil do
+        io.stdout:write(("\\x%x"):format(byte))
+        pos = pos + 1
+        byte = string:byte(pos)
+    end
+    io.stdout:write("'")
+end
+
+local function write_lua_value(value)
+    if type(value) == 'string' then
+        write_lua_string(value)
+    elseif type(value) == 'table' then
+        write_lua_table(value)
+    else
+        io.stdout:write(tostring(value))
+    end
+end
+
+local function write_lua_fieldpair(key, val)
+    io.stdout:write("[")
+    write_lua_value(key)
+    io.stdout:write("] = ")
+    write_lua_value(val)
+end
+
+write_lua_table = function(tuple)
+    io.stdout:write('{')
+    local is_begin = true
+    for key, val in pairs(tuple) do
+        if is_begin == false then
+            io.stdout:write(', ')
+        else
+            is_begin = false
+        end
+        write_lua_fieldpair(key, val)
+    end
+    io.stdout:write('}')
+end
+
+local function cat_lua_cb(record)
+    io.stdout:write(('box.space[%d]'):format(record.BODY.space_id))
+    local op = record.HEADER.type:lower()
+    io.stdout:write((':%s('):format(op))
+    if op == 'insert' or op == 'replace' then
+        write_lua_table(record.BODY.tuple)
+    elseif op == 'delete' then
+        write_lua_table(record.BODY.key)
+    elseif op == 'update' then
+        write_lua_table(record.BODY.key)
+        io.stdout:write(', ')
+        write_lua_table(record.BODY.tuple)
+    elseif op == 'upsert' then
+        write_lua_table(record.BODY.tuple)
+        io.stdout:write(', ')
+        write_lua_table(record.BODY.operations)
+    end
+    io.stdout:write(')\n')
+end
+
+local function cat_yaml_cb(record)
+    print(yaml.encode(record):sub(1, -6))
+end
+
+local function cat_json_cb(record)
+    print(json.encode(record))
+end
+
+local cat_formats = setmetatable({
+    yaml = cat_yaml_cb,
+    json = cat_json_cb,
+    lua  = cat_lua_cb,
+}, {
+    __index = function(self, cmd)
+        error(("Unknown formatter '%s'"):format(cmd))
+    end
+})
+
+local function cat_command(files, options)
+    local from, to, spaces = options.from, options.to, options.spaces
+    local show_system, cat_format = options['show-system'], options.format
+
+    local format_cb   = cat_formats[cat_format]
+    local is_printed  = false
+    for id, file in ipairs(files) do
+        log.info(("Processing file '%s'"):format(file))
+        for lsn, record in xlog.open(file) do
+            local sid = record.BODY.space_id
+            if (lsn < from) or
+               (sid < 512 and show_system == false) or
+               (spaces ~= nil and find_space(sid, spaces)) then
+                -- pass this tuple
+            elseif lsn > to then
+                -- stop, as we've had finished reading tuple with lsn == to
+                -- and next lsn's will be bigger
+                break
+            else
+                is_printed = true
+                format_cb(record)
+                io.stdout:flush()
+            end
+        end
+        if options.format == 'yaml' and is_printed then
+            is_printed = false
+            print('...\n')
+        end
+    end
+end
+
+local function play_command(files, options)
+    local from, to, spaces = options.from, options.to, options.spaces
+    local show_system = options['show-system']
+    local uri = table.remove(files, 1)
+
+    if uri == nil then
+        error("Empty URI is provided")
+    end
+    local receiver = remote.new(uri)
+    if receiver:wait_connected() == 'closed' then
+        error(("Error, while connecting to host '%s'"):format(uri))
+    end
+    for id, file in ipairs(files) do
+        log.info(("Processing file '%s'"):format(file))
+        for lsn, record in xlog.open(file) do
+            local sid = record.BODY.space_id
+            if (lsn < from) or
+               (sid < 512 and show_system == false) or
+               (spaces ~= nil and find_space(sid, spaces)) then
+                -- pass this tuple
+            elseif lsn > to then
+                -- stop, as we've had finished reading tuple with lsn == to
+                -- and next lsn's will be bigger
+                break
+            else
+                local args, so = {}, receiver.space[sid]
+                table.insert(args, so)
+                table.insert(args, record.BODY.key)
+                table.insert(args, record.BODY.tuple)
+                table.insert(args, record.BODY.operations)
+                -- print(record.HEADER.type:lower(), yaml.encode(args))
+                so[record.HEADER.type:lower()](unpack(args))
+            end
+        end
+    end
+    receiver:close()
+end
+
+local function connect_command(options, arguments)
+    local uri = table.remove(options)
+    console.on_start(function(self)
+        local status, reason
+        status, reason = pcall(function() require('console').connect(uri) end)
+        if not status then
+            self:print(reason)
+            self.running = false
+        end
+    end)
+    console.on_client_disconnect(function(self) self.running = false end)
+    console.start()
+    return 0
+end
+
+--[[--
+local function help_command(cmd_name)
+end
+--]]--
+
+local commands = setmetatable({
+    cat     = cat_command,
+    play    = play_command,
+    connect = connect_command,
+}, {
+    __index = function(self, cmd)
+        error(("Unknown comamnd '%s'"):format(cmd))
+    end
+})
+
+local function parameters_populate(parameters)
+    parameters                = parameters                or {}
+    parameters.from           = parameters.from           or 0
+    parameters.to             = parameters.to             or -1ULL
+    parameters['show-system'] = parameters['show-system'] or false
+    parameters.format         = parameters.format         or 'yaml'
+    return parameters
+end
+
+-- returns command name, file list and named parameters
+local function parameters_parse(parameters)
+    local cmd_name = table.remove(parameters, 1)
+    local files = {}
+    while true do
+        local elem = table.remove(parameters, 1)
+        if elem == nil then
+            break
+        end
+        table.insert(files, elem)
+    end
+    return cmd_name, files, parameters
+end
+
+local parameters = parameters_get(arg, {
+    { 'space',        'number+' },
+    { 'show-system',  'boolean' },
+    { 'from',         'number'  },
+    { 'to',           'number'  },
+    { 'help',         'boolean' },
+    { 'format',       'string'  }
+})
+
+local cmd_name, files, parameters = parameters_parse(parameters)
+print(yaml.encode(files))
+if cmd_name == 'help' or parameters.help == true then
+    help_command(cmd_name)
+end
+parameters = parameters_populate(parameters)
+
+commands[cmd_name](files, parameters)
+
+os.exit(0)
 
 -- vim: syntax=lua

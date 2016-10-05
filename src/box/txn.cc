@@ -62,7 +62,6 @@ txn_add_redo(struct txn_stmt *stmt, struct request *request)
 	row->lsn = 0;
 	row->sync = 0;
 	row->tm = 0;
-	row->ignore_crc = 0;
 	row->bodycnt = request_encode(request, row->body);
 	stmt->row = row;
 }

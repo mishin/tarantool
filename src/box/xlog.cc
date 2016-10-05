@@ -528,7 +528,7 @@ error:
 		return 1;
 
 	/* Validate checksum */
-	if (row->ignore_crc == 0 && crc32_calc(0, rbuf->wpos, len) != crc32c) {
+	if (i->ignore_crc == false && crc32_calc(0, rbuf->wpos, len) != crc32c) {
 		char buf[PATH_MAX];
 		snprintf(buf, sizeof(buf), "%s: row block checksum"
 			 " mismatch (expected %u) at offset %" PRIu64,
@@ -844,6 +844,7 @@ xlog_cursor_open(struct xlog_cursor *i, struct xlog *l)
 	i->row_count = 0;
 	i->good_offset = ftello(l->f);
 	i->eof_read  = false;
+	i->ignore_crc = false;
 	ibuf_create(&i->data, &cord()->slabc,
 		    XLOG_TX_AUTOCOMMIT_THRESHOLD);
 
