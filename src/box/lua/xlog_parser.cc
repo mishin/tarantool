@@ -19,7 +19,7 @@ extern "C" {
 #include <lualib.h>
 }*/ /* extern "C" */
 
-/********************************** helpers **********************************/
+/* {{{ Helpers */
 
 static box_tuple_format_t *fmt = NULL;
 static uint32_t CTID_STRUCT_FFI_XLOG_CURSOR_REF = 0;
@@ -60,7 +60,9 @@ luamp_decode_verify(struct lua_State *L, struct luaL_serializer *cfg,
 	return 1;
 }
 
-/********************************** internal **********************************/
+/* }}} */
+
+/* {{{ Internal */
 
 static int
 parse_body_kv(struct lua_State *L, const char **beg, const char *end)
@@ -131,8 +133,12 @@ parse_body(struct lua_State *L, const char *ptr, size_t len)
 static int
 next_row(struct lua_State *L, xlog_cursor *cur) {
 	struct xrow_header row;
-	if (xlog_cursor_next(cur, &row) != 0)
-		return -1;
+	try {
+		if (xlog_cursor_next(cur, &row) != 0)
+			return -1;
+	} catch (Exception *) {
+		return lbox_error(L);
+	}
 
 	lua_pushinteger(L, row.lsn);
 	lua_newtable(L);
@@ -177,7 +183,9 @@ next_row(struct lua_State *L, xlog_cursor *cur) {
 	return 0;
 }
 
-/******************************** XLOG_PARSER ********************************/
+/* }}} */
+
+/* {{{ Xlog Parser */
 
 static int
 lbox_xlog_parser_gc(struct lua_State *L)
@@ -209,24 +217,28 @@ lbox_xlog_parser_iterate(struct lua_State *L)
 	return 0;
 }
 
-/********************************** MODULE ***********************************/
+/* }}} */
 
 struct xlog *
-lbox_initxlog(FILE *f)
+lbox_initxlog(FILE *f, const char *filename)
 {
-	xlog *log = (xlog *)calloc(1, sizeof(xlog));
+	xdir *dir = (xdir *)calloc(1, sizeof(xdir));
+	if (dir == NULL)
+		tnt_raise(OutOfMemory, sizeof(xdir), "malloc", "struct xdir");
+	dir->panic_if_error = false;
+	dir->server_uuid == NULL;
 
+	xlog *log = (xlog *)calloc(1, sizeof(xlog));
 	if (log == NULL)
 		tnt_raise(OutOfMemory, sizeof(xlog), "malloc", "struct xlog");
 
 	log->f = f;
-	log->filename[0] = 0;
+	log->dir = dir;
 	log->mode = LOG_READ;
-	log->dir = NULL;
-	log->is_inprogress = false;
 	log->eof_read = false;
+	log->is_inprogress = false;
 	vclock_create(&log->vclock);
-
+	strncpy(log->filename, filename, PATH_MAX + 1);
 	return log;
 }
 
@@ -247,7 +259,7 @@ lbox_xlog_skip_header(struct lua_State *L, FILE *f, const char *filename)
 }
 
 static int
-lbox_xlog_parser_open(struct lua_State *L)
+lbox_xlog_parser_open_pairs(struct lua_State *L)
 {
 	int args_n = lua_gettop(L);
 	if (args_n != 1 || !lua_isstring(L, 1))
@@ -278,7 +290,7 @@ lbox_xlog_parser_open(struct lua_State *L)
 		/* TODO: throw error */
 	}
 	/* Construct xlog object */
-	obj->xlobject = lbox_initxlog(f);
+	obj->xlobject = lbox_initxlog(f, filename);
 	/* Construct xlog cursor */
 	obj->xlcobject = (struct xlog_cursor *)calloc(1,
 			sizeof(struct xlog_cursor));
@@ -300,8 +312,8 @@ lbox_xlog_parser_open(struct lua_State *L)
 }
 
 static const struct luaL_reg lbox_xlog_parser_lib [] = {
-	{ "open",	lbox_xlog_parser_open },
-	{ NULL,		NULL                  }
+	{ "pairs",	lbox_xlog_parser_open_pairs },
+	{ NULL,		NULL                        }
 };
 
 void
