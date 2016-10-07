@@ -98,6 +98,7 @@ parse_body_kv(struct lua_State *L, const char **beg, const char *end)
 					return -1;
 				}
 				lbox_pushtuple(L, tuple);
+				break;
 			}
 		}
 	default:
@@ -193,6 +194,8 @@ lbox_xlog_parser_gc(struct lua_State *L)
 	struct ffi_xlog_cursor *log = lbox_checkffixlog(L, 1, "");
 
 	if (log->xlobject) {
+		free(log->xlobject->dir);
+		log->xlobject->dir = NULL;
 		xlog_close(log->xlobject);
 		log->xlobject = NULL;
 	}
@@ -277,7 +280,7 @@ lbox_xlog_parser_open_pairs(struct lua_State *L)
 		luaL_error(L, "%s: failed to read log file header", filename);
 	}
 
-	if (strcmp("0.12\n", version) != 0) {
+	if (strcmp("0.12\n", version) != 0 && strcmp("0.13\n", version) != 0) {
 		version[strlen(version) - 1] = '\0';
 		luaL_error(L, "%s: unsupported file format version '%s'",
 			   filename, version);
@@ -287,7 +290,8 @@ lbox_xlog_parser_open_pairs(struct lua_State *L)
 	struct ffi_xlog_cursor *obj = (struct ffi_xlog_cursor *)calloc(1,
 			sizeof(struct ffi_xlog_cursor));
 	if (obj == NULL) {
-		/* TODO: throw error */
+		tnt_raise(OutOfMemory, sizeof(struct ffi_xlog_cursor),
+			  "malloc", "struct ffi_xlog_cursor");
 	}
 	/* Construct xlog object */
 	obj->xlobject = lbox_initxlog(f, filename);
@@ -296,7 +300,8 @@ lbox_xlog_parser_open_pairs(struct lua_State *L)
 			sizeof(struct xlog_cursor));
 	obj->xlcobject->ignore_crc = true;
 	if (obj->xlcobject == NULL) {
-		/* TODO: throw error */
+		tnt_raise(OutOfMemory, sizeof(struct xlog_cursor),
+			  "malloc", "struct xlog_cursor");
 	}
 	xlog_cursor_open(obj->xlcobject, obj->xlobject);
 

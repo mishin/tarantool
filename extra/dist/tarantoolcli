@@ -1,13 +1,14 @@
 #!/usr/bin/env tarantool
 
-local io      = require('io')
-local fun     = require('fun')
-local log     = require('log')
-local json    = require('json')
-local xlog    = require('xlog')
-local yaml    = require('yaml')
-local remote  = require('net.box')
-local console = require('console')
+local io       = require('io')
+local fun      = require('fun')
+local log      = require('log')
+local json     = require('json')
+local xlog     = require('xlog')
+local yaml     = require('yaml')
+local remote   = require('net.box')
+local console  = require('console')
+local argparse = require('internal.argparse').parse
 
 local function find_space(sid, spaces)
     if type(spaces) == 'number' then
@@ -228,7 +229,7 @@ local function parameters_parse(parameters)
     return cmd_name, files, parameters
 end
 
-local parameters = parameters_get(arg, {
+local parameters = argparse(arg, {
     { 'space',        'number+' },
     { 'show-system',  'boolean' },
     { 'from',         'number'  },
