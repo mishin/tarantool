@@ -528,14 +528,16 @@ error:
 		return 1;
 
 	/* Validate checksum */
-	if (i->ignore_crc == false && crc32_calc(0, rbuf->wpos, len) != crc32c) {
+	if (crc32_calc(0, rbuf->wpos, len) != crc32c) {
 		char buf[PATH_MAX];
 		snprintf(buf, sizeof(buf), "%s: row block checksum"
 			 " mismatch (expected %u) at offset %" PRIu64,
 			 fio_filename(fileno(f)), (unsigned) crc32c,
 			 (uint64_t) ftello(f));
-		tnt_error(ClientError, ER_INVALID_MSGPACK, buf);
-		return -1;
+		if (i->ignore_crc == false) {
+			tnt_error(ClientError, ER_INVALID_MSGPACK, buf);
+			return -1;
+		}
 	}
 	rbuf->wpos += len;
 

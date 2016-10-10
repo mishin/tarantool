@@ -68,8 +68,7 @@ static int
 parse_body_kv(struct lua_State *L, const char **beg, const char *end)
 {
 	if (mp_typeof(**beg) != MP_UINT) {
-		/* That means we have broken package */
-		return -1;
+		return luaL_error(L, "Broken size of package");
 	}
 	char buf[32];
 	uint32_t v = mp_decode_uint(beg);
@@ -102,8 +101,9 @@ parse_body_kv(struct lua_State *L, const char **beg, const char *end)
 			}
 		}
 	default:
-		if (luamp_decode_verify(L, luaL_msgpack_default, beg, end) == -1)
-			lua_pushstring(L, "error");
+		if (luamp_decode_verify(L, luaL_msgpack_default, beg, end) == -1) {
+			lua_pushstring(L, "<mp_check failed>");
+		}
 	}
 	lua_settable(L, -3);
 	return 0;
