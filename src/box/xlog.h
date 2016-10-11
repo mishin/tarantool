@@ -39,10 +39,10 @@
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 
+#include "afio.h"
 #include "small/ibuf.h"
 #include "small/obuf.h"
 
-struct iovec;
 struct xrow_header;
 
 #if defined(__cplusplus)
@@ -94,7 +94,7 @@ struct xdir {
 	 * A write ahead log opened with write mode can use
 	 * O_DIRECT flag, for example.
 	 */
-	char open_wflags[6];
+	char open_wflags[10];
 	/**
 	 * A pointer to this server uuid. If not assigned
 	 * (tt_uuid_is_nil returns true), server id check
@@ -190,17 +190,12 @@ struct xlog_tx {
 	/** The current offset in the log file, for writing. */
 	off_t offset;
 	/**
-	 * Output buffer, works as row accumulator for
-	 * compression.
+	 * Output buffer, works as row accumulator
 	 */
 	struct obuf obuf;
 
 	/** The context of zstd compression */
 	ZSTD_CCtx *zctx;
-	/** Compressed output buffer, used only if compression is
-	 * ON.
-	 */
-	struct obuf zbuf;
 };
 
 /**
@@ -210,7 +205,9 @@ struct xlog {
 	/** The directory this file is in. */
 	struct xdir *dir;
 	/** File handle. */
-	FILE *f;
+	struct afio *f;
+	/** File appender */
+	struct afio_appender appender;
 	/** Mode in which this file has been opened: read or write. */
 	enum log_mode mode;
 	/**
@@ -243,9 +240,13 @@ struct xlog {
 	 */
 	struct vclock vclock;
 	/**
-	 * Current writing xlog block
+	 * Current writing xlog transaction
 	 */
 	struct xlog_tx xlog_tx;
+	/**
+	 * Offset of first xlog tx
+	 */
+	off_t first_tx_offset;
 };
 
 /**
@@ -274,7 +275,7 @@ xlog_open(struct xdir *dir, int64_t signature);
 
 struct xlog *
 xlog_open_stream(struct xdir *dir, int64_t signature,
-		 FILE *file, const char *filename);
+		 struct afio *file, const char *filename);
 
 /**
  * Create a new file and open it in write (append) mode.
@@ -321,12 +322,17 @@ xlog_atfork(struct xlog **lptr);
 struct xlog_cursor
 {
 	struct xlog *log;
+	/** xlog file reader */
+	struct afio_reader reader;
 	int row_count;
-	off_t good_offset;
 	bool eof_read;
-	struct ibuf data;
-
+	/* Curent row pointer in xlog tx row buffer */
+	char *rpos;
+	/* End of cursor row buffer */
+	char *epos;
+	/* zstd decompressor */
 	ZSTD_DStream* zdctx;
+	/* Output buffer for zstd */
 	struct ibuf zbuf;
 };
 
@@ -432,7 +438,7 @@ xlog_cursor_next_xc(struct xlog_cursor *i, struct xrow_header *row)
 }
 
 static inline struct xlog *
-xlog_open_stream_xc(struct xdir *dir, int64_t signature, FILE *file,
+xlog_open_stream_xc(struct xdir *dir, int64_t signature, struct afio *file,
 		    const char *filename)
 {
 	struct xlog *rv = xlog_open_stream(dir, signature, file, filename);

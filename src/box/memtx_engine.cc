@@ -1060,8 +1060,8 @@ MemtxEngine::bootstrap()
 	say_info("initializing an empty data directory");
 	struct xdir dir;
 	xdir_create(&dir, "", SNAP, &uuid_nil);
-	FILE *f = fmemopen((void *) &bootstrap_bin,
-			   sizeof(bootstrap_bin), "r");
+	struct afio *f = afio_mem_open((char *) &bootstrap_bin,
+			   sizeof(bootstrap_bin), "r", "bootstrap");
 	struct xlog *snap = xlog_open_stream_xc(&dir, 0, f, "bootstrap.snap");
 	struct xlog_cursor cursor;
 	xlog_cursor_open(&cursor, snap);
@@ -1123,7 +1123,7 @@ checkpoint_write_row(struct xlog *l, struct xrow_header *row,
 		 * not really enforced.
 		 */
 		if (bytes > snap_io_rate_limit)
-			fdatasync(fileno(l->f));
+			afio_fdatasync(l->f, false);
 	}
 	while (bytes > snap_io_rate_limit) {
 		ev_now_update(loop);

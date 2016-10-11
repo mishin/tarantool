@@ -98,7 +98,9 @@ set (server_sources
      opts.c
      cfg.c
      cpu_feature.c
-     fiob.c
+     afio.c
+     afio_posix.c
+     afio_mem.c
      tt_uuid.c
      uri.c
      backtrace.cc
