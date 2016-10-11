@@ -5485,9 +5485,9 @@ vy_end_recovery(struct vy_env *e)
 struct vy_stmt_iterator;
 
 typedef int (*vy_iterator_next_key_f)(struct vy_stmt_iterator *virt_iterator,
-				      struct vy_stmt **ret);
+				      struct vy_stmt *in, struct vy_stmt **ret);
 typedef int (*vy_iterator_next_lsn_f)(struct vy_stmt_iterator *virt_iterator,
-				      struct vy_stmt **ret);
+				      struct vy_stmt *in, struct vy_stmt **ret);
 typedef int (*vy_iterator_restore_f)(struct vy_stmt_iterator *virt_iterator,
 				     struct vy_stmt *last_stmt,
 				     struct vy_stmt **ret);
@@ -6050,7 +6050,7 @@ vy_run_iterator_find_lsn(struct vy_run_iterator *itr, struct vy_stmt **ret)
  * recursivly calls vy_run_iterator_next_key().
  */
 static int
-vy_run_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret);
+vy_run_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret);
 /**
  * Find next (lower, older) record with the same key as current
  * Return true if the record was found
@@ -6121,7 +6121,7 @@ vy_run_iterator_start(struct vy_run_iterator *itr, struct vy_stmt **ret)
 		 * given (special branch of code in vy_run_iterator_search),
 		 * so we need to make a step on previous key
 		 */
-		return vy_run_iterator_next_key(&itr->base, ret);
+		return vy_run_iterator_next_key(&itr->base, NULL, ret);
 	} else {
 		assert(itr->order == VINYL_GE || itr->order == VINYL_GT ||
 		       itr->order == VINYL_EQ);
@@ -6232,8 +6232,9 @@ vy_run_iterator_locate(struct vy_run_iterator *itr, struct vy_stmt **result)
  * @retval -2 invalid iterator
  */
 static int
-vy_run_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
+vy_run_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret)
 {
+	(void)in;
 	assert(vitr->iface->next_key == vy_run_iterator_next_key);
 	struct vy_run_iterator *itr = (struct vy_run_iterator *) vitr;
 	*ret = NULL;
@@ -6326,8 +6327,9 @@ vy_run_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
  * @retval -2 invalid iterator
  */
 static int
-vy_run_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
+vy_run_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret)
 {
+	(void)in;
 	assert(vitr->iface->next_lsn == vy_run_iterator_next_lsn);
 	struct vy_run_iterator *itr = (struct vy_run_iterator *) vitr;
 	*ret = NULL;
@@ -6429,11 +6431,11 @@ vy_run_iterator_restore(struct vy_stmt_iterator *vitr,
 		if (next_stmt->lsn >= last_stmt->lsn) {
 			/* skip the same stmt to next stmt or older version */
 			do {
-				if (vy_run_iterator_next_lsn(vitr, &next_stmt)) {
+				if (vy_run_iterator_next_lsn(vitr, next_stmt, &next_stmt)) {
 					return -1;
 				}
 				if (next_stmt == NULL) {
-					vy_run_iterator_next_key(vitr, &next_stmt);
+					vy_run_iterator_next_key(vitr, next_stmt, &next_stmt);
 					break;
 				}
 			} while (next_stmt->lsn >= last_stmt->lsn);
@@ -6715,8 +6717,9 @@ vy_mem_iterator_open(struct vy_mem_iterator *itr, struct vy_mem *mem,
  * @retval 0 success or EOF (*ret == NULL)
  */
 static int
-vy_mem_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
+vy_mem_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret)
 {
+	(void)in;
 	assert(vitr->iface->next_key == vy_mem_iterator_next_key);
 	struct vy_mem_iterator *itr = (struct vy_mem_iterator *) vitr;
 	*ret = NULL;
@@ -6755,8 +6758,9 @@ vy_mem_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
  * @retval 0 success or EOF (*ret == NULL)
  */
 static int
-vy_mem_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
+vy_mem_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret)
 {
+	(void)in;
 	assert(vitr->iface->next_lsn == vy_mem_iterator_next_lsn);
 	struct vy_mem_iterator *itr = (struct vy_mem_iterator *) vitr;
 	*ret = NULL;
@@ -6831,9 +6835,9 @@ vy_mem_iterator_restore(struct vy_stmt_iterator *vitr,
 			if (next_stmt->lsn >= last_stmt->lsn) {
 				/* skip the same stmt to next stmt or older version */
 				do {
-					vy_mem_iterator_next_lsn(vitr, &next_stmt);
+					vy_mem_iterator_next_lsn(vitr, next_stmt, &next_stmt);
 					if (next_stmt == NULL) {
-						vy_mem_iterator_next_key(vitr, &next_stmt);
+						vy_mem_iterator_next_key(vitr, next_stmt, &next_stmt);
 						break;
 					}
 				} while (next_stmt->lsn >= last_stmt->lsn);
@@ -7059,8 +7063,9 @@ vy_txw_iterator_start(struct vy_txw_iterator *itr, struct vy_stmt **ret)
  * @retval 0 success or EOF (*ret == NULL)
  */
 static int
-vy_txw_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
+vy_txw_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret)
 {
+	(void)in;
 	assert(vitr->iface->next_key == vy_txw_iterator_next_key);
 	struct vy_txw_iterator *itr = (struct vy_txw_iterator *) vitr;
 	*ret = NULL;
@@ -7099,10 +7104,11 @@ vy_txw_iterator_next_key(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
  * @retval 0 EOF always
  */
 static int
-vy_txw_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct vy_stmt **ret)
+vy_txw_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct vy_stmt *in, struct vy_stmt **ret)
 {
 	assert(vitr->iface->next_lsn == vy_txw_iterator_next_lsn);
 	(void)vitr;
+	(void)in;
 	*ret = NULL;
 	return 0;
 }
@@ -7469,7 +7475,9 @@ vy_merge_iterator_propagate(struct vy_merge_iterator *itr)
 			return rc;
 		if (itr->src[i].front_id != itr->front_id)
 			continue;
-		rc = itr->src[i].iterator.iface->next_key(&itr->src[i].iterator, &itr->stmts[i]);
+		rc = itr->src[i].iterator.iface->next_key(&itr->src[i].iterator,
+							  itr->curr_stmt,
+							  &itr->stmts[i]);
 		if (rc)
 			return rc;
 	}
@@ -7508,7 +7516,8 @@ restart:
 		 * In the second case start it by the first call of next_key.
 		 */
 		if (itr->stmts[i] == NULL) {
-			rc = sub_itr->iface->next_key(sub_itr, &itr->stmts[i]);
+			rc = sub_itr->iface->next_key(sub_itr, itr->curr_stmt,
+						      &itr->stmts[i]);
 		} else {
 			rc = 0;
 		}
@@ -7604,7 +7613,8 @@ vy_merge_iterator_locate(struct vy_merge_iterator *itr,
 			if (rc)
 				return rc;
 		} else if (itr->stmts[i] == NULL) {
-			rc = sub_itr->iface->next_key(sub_itr, &itr->stmts[i]);
+			rc = sub_itr->iface->next_key(sub_itr, itr->curr_stmt,
+						      &itr->stmts[i]);
 		}
 		if (rc)
 			return rc;
@@ -7681,7 +7691,8 @@ vy_merge_iterator_next_lsn(struct vy_merge_iterator *itr, struct vy_stmt **ret)
 	if (itr->curr_src == UINT32_MAX)
 		return 1;
 	struct vy_stmt_iterator *sub_itr = &itr->src[itr->curr_src].iterator;
-	rc = sub_itr->iface->next_lsn(sub_itr, &itr->stmts[itr->curr_src]);
+	rc = sub_itr->iface->next_lsn(sub_itr, itr->curr_stmt,
+				      &itr->stmts[itr->curr_src]);
 	if (rc) {
 		return rc;
 	} else if (itr->stmts[itr->curr_src]) {
@@ -7704,7 +7715,8 @@ vy_merge_iterator_next_lsn(struct vy_merge_iterator *itr, struct vy_stmt **ret)
 			struct vy_stmt *t;
 			t = itr->stmts[i];
 			if (t == NULL) {
-				rc = sub_itr->iface->next_lsn(sub_itr, &itr->stmts[i]);
+				rc = sub_itr->iface->next_lsn(sub_itr, itr->curr_stmt,
+							      &itr->stmts[i]);
 				if (rc)
 					return rc;
 				if (itr->stmts[i] == NULL)
